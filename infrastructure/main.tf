@@ -11,6 +11,11 @@ terraform {
 
 # Configuration of the AWS provider such as region, access key, secret key
 # See https://registry.terraform.io/providers/hashicorp/aws/5.84.0/docs
+# Credentials are typically read from environment variables, however
+# when running in CI/CD pipelines, credentials are often passed in as variables.
+#
+# The current configuration assumes credentials are configured in environment variables
+# or in the ~/.aws/credentials file
 provider "aws" {
   region = var.region
 }
