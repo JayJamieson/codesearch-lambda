@@ -1,0 +1,5 @@
+infrastructure/terraform.tfstate
+infrastructure/.terraform/
+infrastructure/function.zip
+bootstrap
+infrastructure/.terraform.lock.hcl
