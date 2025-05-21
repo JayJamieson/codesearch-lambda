@@ -60,6 +60,8 @@ resource "aws_lambda_function" "lambda" {
   # Function is terminate if it does not complete within the timeout period
   timeout      = 900
 
+  memory_size = 256
+
   depends_on = [
     aws_iam_role_policy_attachment.lambda_policy_attachment,
   ]
