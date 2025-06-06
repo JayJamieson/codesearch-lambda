@@ -1,21 +1,29 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
+	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-lambda-go/lambdacontext"
 	"github.com/go-git/go-git/v5"
 	"github.com/google/codesearch/index"
+	"github.com/google/codesearch/regexp"
 )
+
+var master = "/tmp/.csearchindex"
 
 func debugHandler(ctx context.Context, request events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	eventJson, _ := json.MarshalIndent(request, "", "  ")
@@ -46,11 +54,13 @@ func debugHandler(ctx context.Context, request events.APIGatewayV2HTTPRequest) (
 func handler(ctx context.Context, request events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 
 	var err error
+	var result string
 	switch request.RequestContext.HTTP.Path {
 	case "/cindex":
 		err = indexRepo(ctx, request)
+		result = "Success"
 	case "/csearch":
-		return events.APIGatewayV2HTTPResponse{Body: "Not Found", StatusCode: 404}, nil
+		result, err = searchRepo(ctx, request)
 	default:
 		return events.APIGatewayV2HTTPResponse{Body: "Not Found", StatusCode: 404}, nil
 	}
@@ -62,10 +72,172 @@ func handler(ctx context.Context, request events.APIGatewayV2HTTPRequest) (event
 		return events.APIGatewayV2HTTPResponse{Body: err.Error(), StatusCode: 500}, err
 	}
 
-	return events.APIGatewayV2HTTPResponse{Body: "Success", StatusCode: 200}, nil
+	return events.APIGatewayV2HTTPResponse{Body: result, StatusCode: 200}, nil
 }
 
-func indexRepo(ctx context.Context, request events.APIGatewayV2HTTPRequest) error {
+func searchRepo(_ context.Context, request events.APIGatewayV2HTTPRequest) (string, error) {
+	term, tOk := request.QueryStringParameters["q"]
+	flags, fOk := request.QueryStringParameters["args"]
+
+	if !tOk || term == "" || !fOk || flags == "" {
+		return "", errors.New("args or q not provided")
+	}
+
+	if request.RequestContext.HTTP.Method != "GET" {
+		return "", errors.New("method not allowed")
+	}
+
+	commandLine := flag.NewFlagSet("", flag.ExitOnError)
+	var fFlag = commandLine.String("f", "", "search only files with names matching this regexp")
+	var iFlag = commandLine.Bool("i", false, "case-insensitive search")
+	var htmlFlag = commandLine.Bool("html", false, "print HTML output")
+	var verboseFlag = commandLine.Bool("verbose", false, "print extra information")
+	var bruteFlag = commandLine.Bool("brute", false, "brute force - search all files in index")
+	var cpuProfile = commandLine.String("cpuprofile", "", "write cpu profile to this file")
+
+	log.SetPrefix("csearch: ")
+	output := bytes.NewBufferString("")
+	g := regexp.Grep{
+		Stdout:  output,
+		Stderr:  output,
+		FlagSet: commandLine,
+	}
+
+	g.AddFlags()
+
+	commandLine.Usage = func() {
+		fmt.Fprintf(output, "Usage: csearch [flags] <regexp>\n")
+	}
+
+	commandLine.Parse(append(strings.Split(flags, ","), term))
+
+	if *htmlFlag {
+		g.HTML = true
+	}
+	args := commandLine.Args()
+
+	if len(args) != 1 {
+		return "", errors.New("args not provided")
+	}
+
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+
+	pat := "(?m)" + args[0]
+	if *iFlag {
+		pat = "(?i)" + pat
+	}
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		log.Fatal(err)
+	}
+	g.Regexp = re
+	var fre *regexp.Regexp
+	if *fFlag != "" {
+		fre, err = regexp.Compile(*fFlag)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	q := index.RegexpQuery(re.Syntax)
+	if *verboseFlag {
+		log.Printf("query: %s\n", q)
+	}
+
+	ix := index.Open(master)
+	ix.Verbose = *verboseFlag
+	var post []int
+	if *bruteFlag {
+		post = ix.PostingQuery(&index.Query{Op: index.QAll})
+	} else {
+		post = ix.PostingQuery(q)
+	}
+	if *verboseFlag {
+		log.Printf("post query identified %d possible files\n", len(post))
+	}
+
+	if fre != nil {
+		fnames := make([]int, 0, len(post))
+
+		for _, fileid := range post {
+			name := ix.Name(fileid)
+			if fre.MatchString(name.String(), true, true) < 0 {
+				continue
+			}
+			fnames = append(fnames, fileid)
+		}
+
+		if *verboseFlag {
+			log.Printf("filename regexp matched %d files\n", len(fnames))
+		}
+		post = fnames
+	}
+
+	var (
+		zipFile   string
+		zipReader *zip.ReadCloser
+		zipMap    map[string]*zip.File
+	)
+
+	for _, fileid := range post {
+		name := ix.Name(fileid).String()
+		if g.L && (pat == "(?m)" || pat == "(?i)(?m)") {
+			g.Reader(bytes.NewReader(nil), name)
+			continue
+		}
+		file, err := os.Open(string(name))
+		if err != nil {
+			if i := strings.Index(name, ".zip\x01"); i >= 0 {
+				zfile, zname := name[:i+4], name[i+5:]
+				if zfile != zipFile {
+					if zipReader != nil {
+						zipReader.Close()
+						zipMap = nil
+					}
+					zipFile = zfile
+					zipReader, err = zip.OpenReader(zfile)
+					if err != nil {
+						zipReader = nil
+					}
+					if zipReader != nil {
+						zipMap = make(map[string]*zip.File)
+						for _, file := range zipReader.File {
+							zipMap[file.Name] = file
+						}
+					}
+				}
+				file := zipMap[zname]
+				if file != nil {
+					r, err := file.Open()
+					if err != nil {
+						continue
+					}
+					g.Reader(r, name)
+					r.Close()
+					continue
+				}
+			}
+			continue
+		}
+		g.Reader(file, name)
+		file.Close()
+	}
+
+	if !g.Match {
+		return "", errors.New("no matches found")
+	}
+
+	return output.String(), nil
+}
+
+func indexRepo(_ context.Context, request events.APIGatewayV2HTTPRequest) error {
 	if request.RequestContext.HTTP.Method != "POST" {
 		return errors.New("method not allowed")
 	}
@@ -100,7 +272,6 @@ func indexRepo(ctx context.Context, request events.APIGatewayV2HTTPRequest) erro
 	resetFlag := false
 	checkFlag := false
 
-	master := "/tmp/.csearchindex"
 	if _, err := os.Stat(master); err != nil {
 		// Does not exist.
 		resetFlag = true

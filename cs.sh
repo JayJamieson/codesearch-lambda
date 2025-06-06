@@ -14,8 +14,8 @@ Usage:
 Options:
   -index       Index the given GitHub repo (POST to /cindex)
   -search      Search indexed repo (GET from /csearch)
-  -repo        Repository URL (required for -search)
-  -query       Search query string (required for -search)
+  -a           Arguments (required for -search)
+  -q           Search query string (required for -search)
   -h           Show this help message
 EOF
 }
@@ -46,12 +46,13 @@ case "$1" in
   -search)
     shift
     # Initialize variables
-    REPO_URL=""
+    ARGS=""
     QUERY=""
     # Parse flags for search
-    while getopts ":repo:query:h" opt; do
-      case $opt in
-        r) REPO_URL="$OPTARG" ;;
+    while getopts ":q:a:h" opt; do
+      # echo $OPTARG
+      case ${opt} in
+        a) ARGS="$OPTARG" ;;
         q) QUERY="$OPTARG" ;;
         h) print_usage; exit 0 ;;
         \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
@@ -59,15 +60,16 @@ case "$1" in
       esac
     done
     # Validate
-    if [ -z "$REPO_URL" ] || [ -z "$QUERY" ]; then
-      echo "Error: -search requires both -repo and -query."
+    if [ -z "$ARGS" ] || [ -z "$QUERY" ]; then
+      echo "Error: -search requires both -a and -q."
       print_usage
       exit 1
     fi
-    echo "Searching repo: $REPO_URL for query: \"$QUERY\""
+    echo "Searching for query: \"$QUERY\" with args \"$ARGS\""
+
     curl -G \
-         --data-urlencode "repo=$REPO_URL" \
-         --data-urlencode "query=$QUERY" \
+         --data-urlencode "args=$ARGS" \
+         --data-urlencode "q=$QUERY" \
          "$BASE_URL/csearch"
     ;;
 

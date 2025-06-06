@@ -371,18 +371,37 @@ type Grep struct {
 
 	PreContext  int // number of lines to print after
 	PostContext int // number of lines to print before
-
-	buf []byte
+	FlagSet     *flag.FlagSet
+	buf         []byte
 }
 
 func (g *Grep) AddFlags() {
-	flag.BoolVar(&g.L, "l", false, "list matching files only")
-	flag.BoolVar(&g.C, "c", false, "print match counts only")
-	flag.BoolVar(&g.N, "n", false, "show line numbers")
-	flag.BoolVar(&g.H, "h", false, "omit file names")
-	flag.IntVar(&g.PreContext, "B", 0, "show `n` lines before match")
-	flag.IntVar(&g.PostContext, "A", 0, "show `n` lines after match")
-	flag.Func("C", "show `n` lines before and after match", func(s string) error {
+	if g.FlagSet == nil {
+		flag.BoolVar(&g.L, "l", false, "list matching files only")
+		flag.BoolVar(&g.C, "c", false, "print match counts only")
+		flag.BoolVar(&g.N, "n", false, "show line numbers")
+		flag.BoolVar(&g.H, "h", false, "omit file names")
+		flag.IntVar(&g.PreContext, "B", 0, "show `n` lines before match")
+		flag.IntVar(&g.PostContext, "A", 0, "show `n` lines after match")
+		flag.Func("C", "show `n` lines before and after match", func(s string) error {
+			n, err := strconv.Atoi(s)
+			if err != nil {
+				return err
+			}
+			g.PreContext = n
+			g.PostContext = n
+			return nil
+		})
+		return
+	}
+
+	g.FlagSet.BoolVar(&g.L, "l", false, "list matching files only")
+	g.FlagSet.BoolVar(&g.C, "c", false, "print match counts only")
+	g.FlagSet.BoolVar(&g.N, "n", false, "show line numbers")
+	g.FlagSet.BoolVar(&g.H, "h", false, "omit file names")
+	g.FlagSet.IntVar(&g.PreContext, "B", 0, "show `n` lines before match")
+	g.FlagSet.IntVar(&g.PostContext, "A", 0, "show `n` lines after match")
+	g.FlagSet.Func("C", "show `n` lines before and after match", func(s string) error {
 		n, err := strconv.Atoi(s)
 		if err != nil {
 			return err
@@ -394,7 +413,12 @@ func (g *Grep) AddFlags() {
 }
 
 func (g *Grep) AddVFlag() {
-	flag.BoolVar(&g.V, "v", false, "show non-matching lines")
+	if g.FlagSet == nil {
+		flag.BoolVar(&g.V, "v", false, "show non-matching lines")
+		return
+	}
+
+	g.FlagSet.BoolVar(&g.V, "v", false, "show non-matching lines")
 }
 
 func (g *Grep) esc(s string) string {
